@@ -1,0 +1,4 @@
+nvd-state.json
+*.digest.md
+*.findings.json
+__pycache__/
