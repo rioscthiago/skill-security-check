@@ -1,6 +1,6 @@
 ---
 name: security-check
-description: Faz review de segurança das mudanças pendentes na branch atual aplicando checklist anti-vibe-coding + OWASP Top 10:2025 + OWASP LLM/Agentic Top 10. Antes de auditar o código, sincroniza com a NVD (nvd.nist.gov), o catálogo KEV da CISA e o GitHub Advisory Database pra processar CVEs novos do stack identificado no projeto (framework, auth, ORM, banco de dados, runtime, automação, servidores MCP...). Use quando quiser auditar brechas antes de fazer deploy, após implementar feature sensível (auth, upload, query, fetch externo, operação financeira, webhook, LLM/agente), ou quando quiser saber se saiu CVE novo relevante pro stack.
+description: Faz review de segurança das mudanças pendentes na branch atual aplicando checklist anti-vibe-coding + OWASP Top 10:2025 + OWASP LLM/Agentic Top 10 + método da Cloudflare (gate de fronteira e resultado, veredictos confirmado/precisa validar/rejeitado, verificação adversarial). Antes de auditar o código, sincroniza com a NVD (nvd.nist.gov), o catálogo KEV da CISA e o GitHub Advisory Database pra processar CVEs novos do stack identificado no projeto (framework, auth, ORM, banco de dados, runtime, automação, servidores MCP...). Use quando quiser auditar brechas antes de fazer deploy, após implementar feature sensível (auth, upload, query, fetch externo, operação financeira, webhook, LLM/agente), quando quiser saber se saiu CVE novo relevante pro stack, para uma pergunta pontual de segurança ou triagem de um achado, e para auditoria completa do repositório inteiro ("audita o repo todo", "pentest do código", "review completo de segurança").
 user-invocable: true
 allowed-tools: Read, Grep, Glob, Bash, Write, Edit
 ---
@@ -11,6 +11,7 @@ Você audita as mudanças pendentes na branch atual buscando vulnerabilidades co
 1. **Sincronização com NVD, CISA KEV e GitHub Advisory** (Fase 0) — o stack do projeto é identificado e os CVEs novos dele são processados antes de olhar o código
 2. Checklist consolidado de padrões recorrentes de exploração em aplicações web modernas (especialmente "vibe coded")
 3. Práticas validadas do **OWASP Top 10:2025**, **OWASP Cheat Sheets**, **OWASP Secure Headers Project**, **OWASP Top 10 for LLM Applications (2025)** e **OWASP Top 10 for Agentic Applications (2026)**
+4. O **método da [Cloudflare security-audit-skill](https://github.com/cloudflare/security-audit-skill)**: só é achado o que cruza uma fronteira de confiança real com resultado concreto; três veredictos (confirmado, precisa validar, rejeitado); severidade calibrada pelo impacto demonstrado; verificação adversarial por agente que não caçou; classes de ataque por domínio (HTTP/identidade, client-side, filas, recursos, isolamento de dados, deploy, supply chain, LLM); modo auditoria completa com ledger de cobertura
 
 Arquivos da skill (todos relativos a esta pasta):
 
@@ -22,6 +23,8 @@ Arquivos da skill (todos relativos a esta pasta):
 | `nvd-watchlist.json` | termos consultados (um por componente do stack) — vem com uma lista inicial genérica e é **ajustado ao stack identificado** no passo 0 da Fase 0 |
 | `nvd-state.json` | estado máquina: `last_check`, `last_cve_processed`, `processed{id: lastModified}` — só o script escreve |
 | `cve-watch.md` | registro humano: última verificação, último CVE processado, tabela de CVEs relevantes por componente com versão mínima segura e o que grepar no código |
+| `cloudflare/` | cópia da skill da Cloudflare (MIT, ver `cloudflare/README.md`): arquivos de domínio com a versão longa de cada classe de ataque, prompts do modo completo, `report-schema.json` e os validadores `validate-findings.cjs` / `validate-coverage-ledger.cjs` |
+| `runs/<repo>/run-N/` | saída do modo auditoria completa (ledger, findings, relatório); runs anteriores servem de base para a próxima |
 
 ## Quando usar
 
@@ -29,11 +32,21 @@ Arquivos da skill (todos relativos a esta pasta):
 - Após mexer em: auth, sessão, cookies, upload, query SQL/NoSQL, fetch externo, CORS, operações financeiras/aprovações, webhooks, integração com LLM/agente/MCP
 - Quando o usuário pedir "review de segurança", "checa brechas", "audita esse código", "saiu CVE novo?"
 
+## Modos de operação
+
+| Modo | Quando | O que roda |
+|---|---|---|
+| **Diff** (padrão) | `/security-check` sem mais nada, "review antes do deploy", "checa essa branch" | Fases 0 → 4 sobre as mudanças pendentes |
+| **Focado** | pergunta de segurança, um arquivo/endpoint, triagem de um achado, "esse CVE me afeta?" | só os blocos relevantes do checklist + gate + veredicto; Fase 0 só se a pergunta envolver dependência/CVE; resposta curta, sem relatório completo nem arquivos |
+| **Auditoria completa** | pedido explícito: "audita o repo inteiro", "pentest do código", "review completo/de ponta a ponta", "quero o relatório" | seção **Auditoria completa** no fim deste arquivo (reconhecimento em paralelo, ledger de cobertura, caçadores, crítico de cobertura, verificadores independentes, `findings.json` validado) |
+
+Se o pedido couber em mais de um modo, fazer **uma** pergunta antes de começar (o modo completo gasta dezenas de agentes).
+
 ## ⛔ Regra inegociável: ZERO mudanças automáticas no projeto auditado
 
 Esta skill **NUNCA** modifica código, configuração, infra, env vars ou dependências **do projeto auditado**. O escopo é **só auditar + reportar**. A skill entrega um **relatório rico** (findings + risco de regressão + ordem sugerida + dependências + modulação) que serve como **insumo para o planejamento nativo do agente** (Claude Code / Codex / outro harness) — a skill não constrói plano de execução próprio, pois isso conflita com o planner do harness.
 
-**Única exceção de escrita:** os arquivos de estado **dentro da pasta desta skill** (`nvd-state.json` via `--commit`, `cve-watch.md`, `nvd-watchlist.json`). Nada fora dela.
+**Única exceção de escrita:** os arquivos de estado **dentro da pasta desta skill** (`nvd-state.json` via `--commit`, `cve-watch.md`, `nvd-watchlist.json`, `runs/`). Nada fora dela. A auditoria descreve o fix; não aplica.
 
 Fluxo:
 
@@ -44,6 +57,64 @@ Fluxo:
 5. A execução em si fica fora da skill — o agente usa o planejamento normal dele com o relatório como contexto
 
 Se o usuário disser "corrige" no meio do relatório, confirmar uma vez: "Quer endereçar todos os CRÍTICOS de uma vez, ou prefere fatiar (ex: auth primeiro, depois input validation)?" — nunca presumir escopo.
+
+## ⛔ Execução segura (vale em todos os modos)
+
+A auditoria é **leitura de fonte**. Rodar código do projeto é exceção, só para confirmar um achado, e com limites:
+
+- **Nunca sondar nada que está no ar**: endpoint deployado, produção, staging compartilhado, webhook real, instância self-hosted, banco de produção, provedor de LLM pago, conta real, dado de usuário. Se o fato decisivo só existe no ambiente deployado, o achado vira **precisa validar** com a checagem que o dono faz (ver gate abaixo).
+- Checagem local só com **principal, dado e segredo fictícios**, sem rede externa, sem instalar dependência (`npm install`, `pip install`, `npx` que baixa pacote), sem publicar nada, sem gastar quota paga, com limite de tempo, escrevendo só em diretório temporário. Se não der para garantir isso, **não execute**: fica precisa validar, com o plano de checagem.
+- Preferir a checagem mais estreita que resolve: teste unitário existente, harness mínimo chamando a função, fixture pequena, política renderizada. Parar no **menor efeito observável** (registro fictício errado, valor de retorno errado). Nunca teste de carga ou de disponibilidade.
+- Se precisar de e-mail num teste, usar um endereço de teste descartável (com sufixo `+teste`), nunca o e-mail real de um usuário ou do dono do projeto.
+- Ferramentas de inspeção da Fase 1 (`npm audit`, `pip-audit`, `osv-scanner`, `gitleaks`, `git grep`) são leitura e continuam liberadas.
+
+## O que é um achado (gate da Cloudflare — aplicar antes de reportar qualquer item)
+
+O checklist da Fase 2 diz **onde olhar**. Um item do checklist em falta **não é achado por si só**. Para virar achado, o candidato precisa nomear:
+
+1. **Principal de menor confiança** e o que ele já pode fazer (anônimo, usuário comum, outro tenant, remetente de webhook, autor de conteúdo que o LLM lê, contribuidor de PR)
+2. **Entrada ou ação aceita** (campo, header, ID, arquivo, mensagem, argumento de tool)
+3. **Controle que deveria barrar** (e onde ele está, ou onde deveria estar)
+4. **Fronteira cruzada** (auth, tenant, dono do recurso, papel, origem, processo)
+5. **Principal ou recurso afetado** (outro usuário, dado de outro tenant, saldo, segredo, servidor)
+6. **Resultado concreto**, observado ou observável pelo dono (lê pedido de outro cliente, executa código, libera curso sem pagar)
+
+Se faltar um desses, ou é **hardening** (vai para a seção própria do relatório, sem severidade de achado), ou é **precisa validar** (se o que falta é um fato fora do código).
+
+### Três veredictos
+
+- **✅ Confirmado** — rastro completo no código (entrada → propagação → sink), controle mais forte visível conferido, condições listadas, resultado demonstrado ou inequívoco no código. **Só confirmado recebe severidade.**
+- **🔍 Precisa validar** — hipótese ancorada no código, bloqueada por **um fato específico** que o repositório não mostra (config do provedor de hospedagem/CDN, proxy na frente, política do IdP, RLS aplicada no painel, header injetado pela borda, versão em produção). Traz o **bloqueio exato** + o **plano de checagem** (local com fixture, ou o que o dono olha no painel). **Sem severidade.** Não é estacionamento para ideia especulativa.
+- **❌ Rejeitado** — o código, um controle visível, uma pré-condição impossível ou a falta de impacto real derruba o candidato. Registrar em uma linha no relatório (evita que a próxima rodada levante o mesmo falso alarme).
+
+### Calibração de severidade (só para confirmado)
+
+| Severidade | Âncora |
+|---|---|
+| 🔴 CRÍTICO | ator **não autenticado** consegue execução de código, acesso total ao banco/storage ou tomar conta de qualquer conta |
+| 🟠 ALTO | derrota **por completo** um controle explícito com consequência real: bypass de auth, leitura/escrita entre tenants, XSS armazenado que atinge outros usuários, RCE autenticado, derrubar serviço compartilhado sem auth, liberar acesso pago sem pagar |
+| 🟡 MÉDIO | violação real de fronteira com raio limitado, pré-condição incomum ou efeito restrito a poucos recursos |
+| 🟢 BAIXO/INFO | vaza detalhe interno não secreto, exige esforço contínuo para ganho mínimo, ou só serve de degrau dentro de outro achado |
+
+- **Discriminador alto × médio:** o resultado demonstrado **derrota por completo** um controle explícito numa ação com consequência real, ou só o enfraquece? Se não dá para dizer o dano concreto, a severidade é menor do que parece.
+- Separar **probabilidade** (pré-condições, quem alcança) de **impacto** (o que acontece). A severidade final nunca passa do impacto demonstrado.
+- Não rebaixar um crítico não verificado para "médio confirmado": se falta o fato, é **precisa validar**.
+- **Exceção mantida de propósito (Fase 0):** dependência em versão afetada por CVE em **KEV** ou com **CVSS ≥ 9** é 🔴 quando a pré-condição do CVE é atendida **ou não dá para determinar pelo código**, mesmo fora do diff: a exploração já está ativa e o fix (bump) é barato. Pré-condição claramente não atendida (só Windows, só dev server, feature não usada) → 🟢 informativo.
+
+### Visibilidade de fonte
+
+Proxy, CDN, WAF, headers injetados pela borda, config do provedor de hospedagem, política do banco aplicada no painel, IdP, cookie policy do navegador e topologia de rede são controles reais. Quando o código não mostra se existem, **não presumir nem presença nem ausência**: precisa validar, dizendo exatamente o que olhar.
+
+### Anti-padrões (não reportar assim)
+
+1. Desvio de checklist apresentado como vulnerabilidade
+2. Conselho de defesa em profundidade sem violação de fronteira alcançável
+3. Teste em ambiente vivo ou compartilhado quando o local não basta
+4. Adivinhar comportamento de provedor, proxy, navegador ou deploy que não está no código
+5. Tratar autoridade do próprio usuário sobre os próprios dados (self-impact) como cruzamento de fronteira
+6. Reportar efeito mais forte que o observado (crash de parser ≠ RCE; trabalho normal ≠ DoS de serviço compartilhado)
+7. Dar severidade a precisa validar
+8. Header, flag de cookie, MFA ou rate limit faltando **sozinho** como achado: exige requisição inválida aceita, impacto entre principais, rebaixamento de garantia ou vazamento de credencial. Sem isso, é hardening
 
 ## Workflow (5 fases)
 
@@ -84,6 +155,10 @@ Antes de checar qualquer coisa, mapeie o terreno:
 - **Stack**: linguagem, framework, ORM, lib de auth, DB, fila, storage, provedor de LLM
 - **Trust boundaries**: o que vem do usuário? o que vem de serviços internos? o que vem de webhooks? o que vem de **conteúdo que o LLM lê** (e-mails, páginas, tickets, resultados de tools)?
 - **Superfícies críticas**: endpoints de auth, fluxos de pagamento, uploads, rotas admin, chamadas a APIs externas, Server Actions, Route Handlers, webhooks de entrada, integração com LLM/MCP
+- **Principais e autoridade** (Cloudflare 1b): cada principal de menor confiança e o que ele pode fazer por design; onde a identidade é estabelecida em cada entrada; onde mora a autorização por recurso e o escopo de tenant/dono; mudanças de privilégio, revogação, recuperação e caminhos de fallback
+- **Entradas → sinks** (Cloudflare 1c): para cada superfície tocada pelo diff (HTTP, Server Action, webhook, fila, arquivo, CLI/env, contexto de LLM/argumento de tool, deep link, IPC local), seguir transformações, **cópias derivadas** (cache, índice de busca, export, log, embedding) e sinks sensíveis; anotar caminhos paralelos que chegam ao mesmo efeito
+- **Visível × deploy**: quais controles estão no código e quais dependem de fato de deploy (proxy, CDN, painel do banco/provedor de hospedagem) — esses viram precisa validar se forem decisivos
+- **Blocos de domínio a aplicar**: escolher na Fase 2 só os blocos cuja fronteira apareceu aqui (não escolher por nome de dependência; escolher porque a fronteira existe). Ao escolher, ler o arquivo correspondente em `cloudflare/` (Core discipline + Validation rules) para o caso concreto
 - **Escopo do diff**:
   ```bash
   git status
@@ -104,7 +179,29 @@ Se houver mudanças staged/unstaged + commits na branch, audite **tudo junto**. 
 
 ### Fase 2 — Auditar contra o checklist
 
-Para cada arquivo modificado, busque os padrões abaixo. Use `grep` e `Read` — não delegue para subagent (queremos verificação direta no diff). As tags `[A0x:2025]` referem-se ao OWASP Top 10:2025.
+Para cada arquivo modificado, busque os padrões abaixo. Use `grep` e `Read` — no modo diff a caça é feita por você, direto no código, sem subagente caçador (subagente entra só na verificação adversarial da Fase 3). As tags `[A0x:2025]` referem-se ao OWASP Top 10:2025.
+
+#### Método de caça (Cloudflare — aplicar em cada superfície do diff)
+
+**Leia a fundo.** Siga cada entrada por parsing, identidade, autorização, normalização, estado, cópias derivadas e sink final. Leia os caminhos irmãos que produzem o mesmo efeito: legado, batch, retry, cancelamento, migração, erro. Compare os controles irmãos por **equivalência**, não só presença, e compare o que um componente garante com o que o próximo presume.
+
+**Trabalhe a partir de um invariante concreto:**
+1. Nomeie o principal de menor confiança e a capacidade inicial
+2. Nomeie o valor, ação, transição de estado ou seletor de recurso aceito
+3. Ache o controle que deveria rejeitar, vincular, isolar, limitar ou revogar
+4. Trace o caminho exato depois dessa decisão
+5. Pare no menor efeito: registro fictício afetado, retorno errado, efeito local observável
+6. Escreva a mudança no código e o caso de teste de regressão que garantem o invariante
+
+**Limite de profundidade:** pare a linha de investigação assim que o invariante estiver resolvido (seguro, achado ou bloqueado) e registre.
+
+**Caminhos tristes e divergências:** ausente, vazio, zero, negativo, máximo, acima do limite, duplicado, encoding misto, expirado, revogado, fora de ordem, concorrente, migração pela metade, dependência fora do ar, rollback — só onde a interface aceita. Compare canonicalização e unidades em cada troca entre parser e política.
+
+**A política efetiva é a do caminho paralelo mais fraco**, não a da UI mais caprichada: liste toda porta para a mesma identidade e toda rota para a mesma operação sensível.
+
+**Variantes:** quando um candidato 🔴/🟠 revelar uma causa raiz reutilizável, procure variantes léxicas, estruturais e lógicas no resto do diff (e, se barato, no repo: `grep` do padrão). Mesma causa raiz = um achado com o rastro mais forte; controles ausentes independentes = achados separados.
+
+**Segunda ordem:** dado seguro ao ser gravado pode virar perigoso depois — nome de campo vira caminho JSON, slug vira caminho de arquivo, texto escapado entra em render cru, string gravada vira URL, regex, template ou expressão de política. Injeção também entra por **nomes de campo, chaves, headers e metadados**, não só valores, e em sistemas secundários (log, cache, índice de busca, analytics).
 
 #### 🔴 Access Control (IDOR + Authz) [A01:2025]
 - [ ] Em CADA operação de read/edit/delete: o backend verifica que o usuário autenticado é dono ou tem permissão sobre o resource específico (não confia em ID do request)
@@ -116,6 +213,11 @@ Para cada arquivo modificado, busque os padrões abaixo. Use `grep` e `Read` —
 - [ ] **Multi-tenant**: toda query em tabela compartilhada carrega `WHERE tenant_id = ...` derivado da sessão, nunca do body/query string
 - [ ] **Open redirect**: `callbackUrl`, `redirect`, `next`, `returnTo` validados contra allowlist de paths relativos (ou mesma origem) — `grep -rn "redirect(\|callbackUrl\|returnTo" <arquivos>`
 - [ ] **Host header**: links de reset/magic link/verificação montados a partir de `APP_URL` fixo, nunca de `Host`/`X-Forwarded-Host` (poisoned reset link); frameworks que confiam no `Host` precisam de allowlist (Starlette < 1.0.1, CVE-2026-48710, entrou no KEV em 2026-09-02 → `TrustedHostMiddleware`; Fastify `trustProxy` por IP)
+- [ ] **Caminho paralelo mais fraco**: existe outra rota para a mesma mudança de estado que checa uma permissão diferente (mais fraca)? Mesmo recurso com vários caminhos de acesso e checks inconsistentes?
+- [ ] **Autenticação sem autorização**: endpoint exige login mas esquece de checar se aquele usuário pode agir naquele recurso
+- [ ] **Campo do body sobrescreve o que a permissão restringiu** (ex.: `tenantId`, `userId`, `status` no payload ganhando da sessão)
+- [ ] **Bulk/batch/export/import**: cada item é autorizado individualmente, não só a operação em lote
+- [ ] **Path traversal completo**: inclui symlink, sequência codificada (`%2e%2e%2f`, `..%5c`), null byte; extração de arquivo compactado (**zip slip**: cada entrada resolvida dentro do destino); arquivo temporário com nome previsível; TOCTOU entre checar e usar o arquivo
 
 #### 🔴 Business Logic / Insecure Design [A06:2025]
 Toda regra de negócio com dinheiro, permissão ou acesso a conteúdo **precisa de validação server-side explícita** — nunca depender só de o frontend esconder um botão. Para CADA feature nova, perguntar: "o que um usuário mal-intencionado tentaria explorar aqui?"
@@ -128,6 +230,24 @@ Toda regra de negócio com dinheiro, permissão ou acesso a conteúdo **precisa 
 - [ ] **Toggle de estado** (publicar/arquivar/banir) valida estado anterior (não pode "republicar" o que já está publicado)
 - [ ] **Workflow de aprovação**: cada transição checa que o ator tem papel certo E o objeto está no estado anterior esperado
 - [ ] **Gate de pagamento por webhook** (Stripe, Mercado Pago, Hotmart, Paddle etc.): status de acesso só muda por evento **assinado e verificado**; a liberação lê o status gravado no banco (fail-closed se o evento não chegou), nunca "libera enquanto o webhook não confirma"
+- [ ] **Máquina de estados**: dá para pular etapa, voltar, chegar a estado inválido, repetir um fluxo já concluído? Se o passo 2 de 3 falha, o passo 1 é desfeito?
+- [ ] **Manipulação numérica**: valor negativo, zero, overflow, perda de precisão (float em dinheiro), coerção string ↔ número (`"10" + 1`), quantidade fracionária onde só cabe inteiro
+- [ ] **Lógica de tempo**: expiração no instante exato da fronteira, janela de rate limit, clock skew, fuso diferente entre componentes (servidor UTC × regra em horário de Brasília)
+- [ ] **Default e fallback**: qual a postura de segurança quando a config falta, a feature flag está desligada, a dependência caiu, a migração está pela metade?
+- [ ] **Confiança implícita em dado armazenado**: "validamos na entrada" — e se outro caminho (import, admin, job, n8n) gravou esse dado sem validar?
+- [ ] **Ação irreversível**: autorização e confirmação vinculadas ao principal, ação e recurso **finais** (não ao que a tela mostrou antes)
+
+#### 🟠 Abuso de funcionalidade e vazamento (Cloudflare — "Feature abuse")
+Funcionalidade legítima usada para outro fim. São bugs de desenho, não de linha de código:
+- [ ] **Export/backup como exfiltração**: usuário de baixo privilégio exporta dado acima do acesso dele, de outros usuários, rascunho, privado, deletado ou histórico que devia ter sido apagado?
+- [ ] **Import/restore como injeção**: import sobrescreve dado existente, cria registro sem a validação normal, grava em coleção sem permissão de escrita, ignora o modelo de permissão da UI?
+- [ ] **Busca/filtro/ordenação como oráculo**: busca revela que existe conteúdo que o usuário não acessa? Filtro deixa sondar status, papel ou campo oculto? Ordenar por campo oculto revela o valor pela ordem?
+- [ ] **Enumeração por efeito colateral**: "não existe" × "sem acesso" com status, tamanho de resposta ou tempo diferentes; enumeração de usuário por reset, convite, cadastro
+- [ ] **Vazamento de preview/rascunho/staging**: token de preview vale só para um item? Rascunho aparece em busca, RSS, sitemap, listagem da API? Header de cache faz a CDN servir conteúdo privado como público?
+- [ ] **Notificação/webhook/callback configurável pelo usuário como SSRF**: URL validada contra rede interna **também depois de redirect**
+- [ ] **Encadeamento**: mapear o que um principal de baixo privilégio pode ler, gravar, invocar e reter, e ligar só saídas concretas a decisões de confiança posteriores (A valida e passa para B: o que A garante é o que B presume? truncamento, coerção, normalização, escopo de tenant)
+- [ ] **Escopo que cresce**: token, API key, OAuth, MCP ou capacidade de agente fica mais amplo depois de delegação, refresh, cache, troca de papel ou composição?
+- [ ] **Rollback e recuperação**: undelete, restore, reverter revisão e cancelamento reaplicam dono, validação e autorização **atuais**?
 
 #### 🔴 Auth & Secrets [A07:2025 · A04:2025]
 - [ ] `grep -rn "process.env.*||" <arquivos>` — `JWT_SECRET || 'default'` é brecha crítica, deve crashar se não configurado
@@ -146,7 +266,15 @@ Toda regra de negócio com dinheiro, permissão ou acesso a conteúdo **precisa 
 - [ ] **Session ID regenerado** após login ou mudança de privilégio (anti session fixation)
 - [ ] **Resposta timing-safe** em login/registro/recuperação de senha — mesma duração para usuário existente vs inexistente (usar processamento assíncrono ou delay artificial). Diferente de constant-time compare: aqui é tempo total da rota, anti-enumeração via side channel
 - [ ] **Magic link / OTP em conta ainda não verificada**: ao provar posse do e-mail, **apagar senha e sessões criadas antes da verificação** e só então marcar verificada (pre-account hijacking: atacante cadastra o e-mail da vítima com senha, vítima entra por magic link, senha do atacante continua valendo — Better Auth GHSA-qq9h-g4jm-xgf3); OAuth auto-link só com e-mail verificado no provider
-- [ ] **OAuth**: `state` + `nonce` + PKCE obrigatórios e **vinculados ao provider** que os emitiu; `redirect_uri` exato (sem wildcard); lib de auth na versão mínima de `cve-watch.md`
+- [ ] **OAuth**: `state` + `nonce` + PKCE obrigatórios e **vinculados ao provider** que os emitiu; `redirect_uri` exato (sem wildcard); lib de auth na versão mínima de `cve-watch.md`; comparar callback inicial, retry, deep link mobile e rota de vincular conta (mesma exigência em todos)
+- [ ] **JWT**: assinatura verificada com **algoritmo fixado no servidor** e chave de fonte fixa; `kid`/`jku`/`x5u` tratados como seletor não confiável; checa `exp`, `nbf`, `aud`, `iss`; nenhum caminho `decode()` sem `verify()` decidindo acesso; token válido emitido para **outro serviço** (mesmo issuer, outra `aud`) é inválido aqui
+- [ ] **Invalidação de sessão**: sessão/refresh token/cookie assinado/estado de WebSocket morrem no logout, troca de senha, revogação, desativação de conta e remoção de papel — inclusive cópias em cache
+- [ ] **Escopo de cookie**: `Domain`/`Path` amplos demais (subdomínio de terceiro ou menos confiável lê/sobrescreve o cookie de sessão)
+- [ ] **CSRF completo**: inventariar toda mutação autenticada por cookie, incluindo form, multipart, `_method` override e rotas legadas; login CSRF; rota só leitura ou com bearer não-ambiente não conta
+- [ ] **Recuperação é o elo mais fraco**: token de reset aleatório, vinculado a usuário + ação, expira, uso único, com rate limit; **gerar um novo invalida os anteriores e derruba as sessões**; troca de e-mail/telefone exige reautenticação; link de entrega montado de URL fixa
+- [ ] **MFA (quando existe)**: cadastrar, trocar ou desativar o segundo fator e gerar códigos de recuperação exigem autenticação recente; step-up vinculado à sessão, ação e recurso certos, uso único; rotas alternativas (API, batch, recuperação, fluxo retomado) não pulam o step-up
+- [ ] **Vincular conta** (adicionar Google/passkey/e-mail/telefone a conta existente): exige sessão atual, posse verificada da nova identidade e `state` vinculado à conta que iniciou; revisar desvincular/revincular e aceitar convite (colisão de identificador verificado ou de tenant)
+- [ ] **API keys**: chave autentica só no escopo (tenant, recurso, ação, ambiente) do registro no servidor; parâmetro do request não amplia; confusão entre chave publicável e secreta; revogação vale mesmo com cache; chave não aparece em URL, redirect, log, bundle ou resposta
 - [ ] **MFA** disponível para ações sensíveis (acesso admin, mudança de senha/email, operações financeiras) — TOTP/WebAuthn quando viável; sinalizar como 🟡 quando ausente
 - [ ] Nunca logar passwords, tokens, keys, dados de cartão
 - [ ] **Segredos não vazam pro bundle**: `grep -rn "NEXT_PUBLIC_\|VITE_\|PUBLIC_" .env* src/` — qualquer key/secret/token com esse prefixo vai pro navegador. `service_role`, `*_SECRET`, `*_PRIVATE_KEY` nunca podem ter prefixo público
@@ -164,6 +292,9 @@ Toda regra de negócio com dinheiro, permissão ou acesso a conteúdo **precisa 
 - [ ] Uploads validam **Magic Bytes** do arquivo, não só MIME type do header
 - [ ] Server tem `bodyLimit` definido (default 1MB para JSON) e limite de profundidade/array em parsers
 - [ ] **Validação de body não é só o schema do framework**: Fastify < 5.8.5 pulava validação com `Content-Type` com espaço/tab à esquerda, < 5.12.1 entregava valor não coagido em schema primitivo na raiz, e `trustProxy: <número>` aceitava `X-Forwarded-*` forjado → revalidar tipo no handler, schema sempre objeto na raiz, `trustProxy` por IP/CIDR
+- [ ] **Injeção indireta (segunda ordem)**: dado gravado "seguro" e depois usado em contexto perigoso por outro código; injeção por **nome de campo, chave, header ou metadado**; injeção em sistema secundário (log, cache, índice de busca, analytics); **template engine** (SSTI) e LDAP/XPath quando existirem
+- [ ] **Injeção em header de resposta**: dado do usuário em `Location`, `Set-Cookie`, CSP ou outro header com CR/LF — conferir se o framework rejeita antes de reportar
+- [ ] **Execução dinâmica**: `Function()`, `vm.runInContext`, `import()` / `require()` com caminho dinâmico, `pickle.loads`, `yaml.load` sem `SafeLoader`
 - [ ] Validação de comprimento de URLs (max 2048 chars) e campos de texto (max length explícito)
 - [ ] **Pagination com max page_size** — nunca permitir requisitar 999999 records
 - [ ] Rate limiting granular em rotas sensíveis (login, upload, financeiro, endpoints que chamam LLM)
@@ -174,6 +305,7 @@ Toda regra de negócio com dinheiro, permissão ou acesso a conteúdo **precisa 
 - [ ] Bloqueia link-local `169.254.0.0/16` (metadata AWS/GCP) e CGNAT `100.64.0.0/10`
 - [ ] Timeout curto (10s) em fetches externos
 - [ ] Verifica IP **após** DNS resolution (anti DNS rebinding)
+- [ ] Revalida o destino **a cada redirect** (ou desliga redirect); cuidado com divergência de parser de URL (`http://a@169.254.169.254`, `http://[::ffff:127.0.0.1]`, decimal/octal `http://2130706433`)
 - [ ] URLs validadas em protocolo (`https://` only, nunca `file://` ou `gopher://`) e domínio (allowlist quando possível)
 - [ ] **URLs de imagem fornecidas pelo usuário** (avatar externo, embed, link preview, OG image) servidas via **proxy próprio de imagem** (Camo, go-camo ou equivalente) que: (a) anonimiza IP do usuário final, (b) faz validação SSRF no fetch, (c) limita número de redirects, (d) força HTTPS, (e) define tamanho máximo. Nunca embedar URL externa diretamente no `<img src>`.
 - [ ] **Next.js `images.remotePatterns`** sem `hostname: '**'` — o otimizador `/_next/image` vira proxy SSRF/DoS aberto
@@ -201,6 +333,7 @@ Toda regra de negócio com dinheiro, permissão ou acesso a conteúdo **precisa 
 
 #### 🔴 Secrets & Configuration [A02:2025]
 - [ ] Nenhum API key, token ou password em código-fonte ou commit history (`git grep -i "password\|secret\|token\|api_key"`; `git log -p --all -S "sk-" -- . | head` para chaves em commits antigos)
+- [ ] **Criptografia mal usada**: ECB, IV estático, nonce reutilizado, criptografia sem autenticação (CBC/CTR sem HMAC; preferir AES-GCM/ChaCha20-Poly1305), derivação de chave fraca; **quando a operação cripto falha, o erro cai para "sem cripto"?**; segredo em URL, mensagem de erro ou resposta visível ao cliente
 - [ ] `.env` e `.env.local` em `.gitignore`, `.env.example` com valores fictícios
 - [ ] Sem credenciais default em qualquer environment
 - [ ] Sem stack traces em error responses de prod
@@ -210,6 +343,12 @@ Toda regra de negócio com dinheiro, permissão ou acesso a conteúdo **precisa 
 - [ ] DB roles com mínimo privilégio por serviço (read-only quando não precisa escrever)
 - [ ] Container não roda como root
 - [ ] **Redis/Postgres/filas só na rede privada** (rede privada do provedor, sem porta pública) e com senha; BullMQ/Bull Board e painéis de admin atrás de auth
+- [ ] **Deriva de precedência de config**: valor de dev, default de chart/Dockerfile, variável de ambiente, flag de linha de comando ou feature flag desliga auth, TLS, escopo de tenant ou auditoria em produção — "renderizar" a config final de cada ambiente mantido, não só o arquivo base
+- [ ] **Segredo vazando entre fronteiras**: em log, crash report, argumento de processo (`ps`), saída de build, imagem Docker (`COPY . .` sem `.dockerignore` cobrindo `.env*`), artefato de CI
+- [ ] **Header de identidade de proxy confiado de qualquer peer**: backend aceita `X-Forwarded-For`/`X-User-Id`/subject de mTLS vindo de fora do ingress (porta alternativa, rota de health/legado que pula o proxy); o que acontece quando o proxy não está na frente?
+- [ ] **URL assinada / objeto**: vincula operação, objeto/versão exata, expiração curta e tenant; continua válida depois que a ACL do recurso muda?
+- [ ] **Edge × origem** (Cloudflare Workers, middleware edge): segredo, API, isolamento ou política de tenant presumidos no edge diferem da origem; fallback para a origem muda autoridade ou cache
+- [ ] **Identidade de carga de trabalho**: credencial de serviço (token do provedor de hospedagem, chave de cloud, service account) só alcança os recursos do papel, e entrada do usuário não escolhe o recurso-alvo dessa credencial
 
 #### 🔴 Next.js / React Server Components (quando o projeto usa Next.js)
 - [ ] **Middleware não é boundary de auth** (CVE-2025-29927 e mais **5 bypasses só em 2026**: i18n, segment-prefetch, injeção de parâmetro de rota dinâmica, Turbopack — CVE-2026-44573/44574/44575/45109/64642): toda page/layout/Route Handler/Server Action reverifica sessão numa Data Access Layer (`server-only` + função `verifySession()`), o middleware é só redirecionamento de UX
@@ -231,6 +370,7 @@ Toda regra de negócio com dinheiro, permissão ou acesso a conteúdo **precisa 
 - [ ] Storage: buckets privados por default; policies por pasta/usuário; URLs assinadas com expiração curta
 - [ ] `@supabase/ssr` com cookies `httpOnly` configurados; sessão validada com `getUser()` (bate no servidor), não só `getSession()` (lê o cookie sem verificar)
 - [ ] Views/functions `SECURITY DEFINER` revisadas (bypassam RLS)
+- [ ] **Política × query divergentes**: RLS, escopo default do ORM e filtro de autorização aplicam o mesmo predicado? Joins, agregações, views, cliente `service_role`/`unscoped` e caminhos de erro sem contexto de usuário ignoram o filtro?
 
 #### 🟠 Security Headers (todos no response, validar com helmet ou equivalente) [A02:2025]
 Lista validada [OWASP Secure Headers Project]:
@@ -243,6 +383,68 @@ Lista validada [OWASP Secure Headers Project]:
 - [ ] CORS com origin explícita, nunca `*` com credentials, **nunca refletir o `Origin` recebido** (equivale a `*`), sem localhost em prod
 - [ ] SSE/EventSource com `withCredentials: true` + `Access-Control-Allow-Credentials: true`
 - [ ] TLS 1.2+ only (TLS 1.0/1.1 desabilitados)
+
+> Pelo gate: header ausente sozinho é **hardening**. Vira achado quando há caminho concreto (ex.: ação que muda estado e pode ser enquadrada em iframe → clickjacking; CORS que reflete origem com credencial e devolve dado sensível). Header injetado pela borda (Cloudflare, Railway, Vercel) não aparece no código → precisa validar.
+
+#### 🟠 Cache e protocolo HTTP (condicional — CDN, proxy, cache compartilhado) · `cloudflare/WEB-PROTOCOL-AND-AUTH.md`
+- [ ] **Cache poisoning por entrada fora da chave**: header (`X-Forwarded-Host`, `X-Forwarded-Proto`, idioma, device), cookie ou query que muda o conteúdo ou headers de segurança da resposta mas não entra na chave de cache
+- [ ] **Cache deception**: rota dinâmica privada tratada como estática pela borda (`/conta/perfil.css`, path parameter `;`), ou resposta com identidade cacheada sem `Cache-Control: private`/`no-store`
+- [ ] **Request smuggling/desync**: só quando o projeto tem proxy próprio ou parser HTTP customizado — `Content-Length` duplicado, `Transfer-Encoding`, downgrade HTTP/2 → 1.1, normalização de header diferente entre front e back
+- [ ] Achado de framing ou cache exige **duas interpretações** do mesmo request/chave: nomear os dois componentes e o valor normalizado em cada lado
+
+#### 🟠 Client-side e navegador (condicional — SPA, extensão, webview, service worker) · `cloudflare/CLIENT-SIDE.md`
+Exige fonte controlável + sink que executa ou revela, e impacto na sessão de **outra** vítima, outra origem ou persistência compartilhada (self-XSS não conta):
+- [ ] **DOM XSS**: `location.hash`/`search`, `document.referrer`, `window.name`, `event.data`, storage → `innerHTML`, `document.write`, `eval`/`setTimeout(string)`, `href`/`src` com `javascript:`/`data:`, APIs HTML do jQuery, escape hatches do framework
+- [ ] **`postMessage`**: handler confere `event.origin` contra allowlist **exata** (nada de `includes`/`startsWith`/regex sem âncora) e, com vários frames da mesma origem, `event.source`; envio de dado sensível nunca com `targetOrigin: '*'`
+- [ ] **WebSocket cross-site (CSWSH)**: upgrade autenticado por cookie confere `Origin` ou exige token do canal
+- [ ] **Prototype pollution só conta com gadget**: escrita recursiva com chave controlada **e** uma propriedade poluída que muda autorização, execução, navegação ou render
+- [ ] **DOM clobbering**: `id`/`name` injetados por markup permitido (sanitizer que mantém `id`) sombreando global ou flag de config usada depois
+- [ ] **Service worker**: script e escopo não controláveis pelo atacante (`Service-Worker-Allowed`); cache do SW não serve resposta personalizada de outra conta depois de logout/troca de conta
+- [ ] **Storage do navegador**: token, resposta privada ou decisão de autorização em `localStorage`/IndexedDB/Cache Storage sobrevivendo ao logout ou lida por outra conta no mesmo navegador; `BroadcastChannel`/evento `storage` levando identidade entre abas sem vincular à sessão atual
+- [ ] **XS-Leaks**: página atacante distingue estado protegido (existe esse objeto? esse usuário é admin?) por load/error, frames, redirect, tempo ou tamanho — exige um predicado secreto concreto
+- [ ] **Navegação**: redirect/navegação client-side a partir de fonte controlável sem política de esquema e destino; `window.open` mantendo `opener`
+
+#### 🟠 Filas, jobs, webhooks e mensageria (condicional — BullMQ, n8n, webhooks, pub/sub, SSE/WebSocket) · `cloudflare/PROTOCOLS-RPC-AND-MESSAGING.md`
+- [ ] **"Interno" não é autenticação**: nomear a identidade do peer em cada salto e como ela vira o principal da aplicação
+- [ ] **Envelope × payload**: autorização usa metadado do envelope/rota mas o handler age sobre tenant/conta/objeto diferente no corpo
+- [ ] **Mensagem que se declara privilegiada**: corpo diz "evento de admin", "callback do provedor", "migração" sem produtor autenticado independente
+- [ ] **Dedupe depois da mutação** ou com chave que colide entre tenants/operações; ack antes do commit (perde trabalho) ou commit antes do ack (duplica)
+- [ ] **Fora de ordem / estado velho**: mensagem antiga (membro já removido, trabalho cancelado) chega depois e sobrescreve o estado novo — checar versão/sequência
+- [ ] **Dead-letter, fila de erro, tracing**: carregam segredo ou payload de outro tenant visível a consumidor menos confiável
+- [ ] **Streaming/assinatura** (SSE, WebSocket, subscription): autorizada uma vez e continua depois de revogação/troca de papel, ou itens seguintes apontam outro recurso
+- [ ] **Correlação de resposta**: ID de correlação previsível/reutilizado deixa uma resposta/callback satisfazer a operação pendente de outro chamador
+- [ ] **Transição em vários consumidores**: falha parcial deixa só parte de uma transição de autorização/negócio gravada
+
+#### 🟠 Esgotamento de recursos e custo (condicional) · `cloudflare/RESOURCE-EXHAUSTION-AND-AVAILABILITY.md`
+Exige caminho entrada → custo, ausência de limite efetivo e impacto em **outro** usuário, serviço compartilhado ou gasto do operador. Rate limit faltando sozinho não basta. **Nunca validar com teste de carga** — análise de complexidade e fixture pequena.
+- [ ] **Amplificação por descompressão/representação**: zip/gzip bomb, imagem com dimensões gigantes, XML com entidades, body comprimido — limite **depois** de cada expansão
+- [ ] **Amplificação de consulta**: `include`/`expand`/profundidade de GraphQL, filtro sem cardinalidade máxima, sort/agregação sem limite, fan-out para muitas chamadas downstream
+- [ ] **Trabalho caro antes da auth**: parse de body grande, bcrypt/argon, descompressão ou chamada externa antes do primeiro gate de tamanho/rate
+- [ ] **Trabalho que continua depois do cancelamento**: cliente desconecta/timeout e a chamada ao LLM, query ou job segue rodando (propagar `AbortSignal`)
+- [ ] **Cardinalidade sem teto**: chaves únicas de cache, labels de métrica, sessões, assinaturas, jobs pendentes crescendo sem limite por item e agregado
+- [ ] **Contabilidade de quota por dimensão manipulável**: IP via `X-Forwarded-For` forjável, chave de rota, prefixo de API key, troca de conta
+- [ ] **Erro fatal alcançável**: entrada não confiável chega a exceção não tratada, `process.exit`, loop infinito ou deadlock no processo compartilhado
+- [ ] **Tempestade de retry** sem jitter/teto/circuit breaker; **mensagem venenosa** travando a cabeça da fila de todos os tenants
+
+#### 🟠 Isolamento de dados e ciclo de vida (condicional — multi-tenant, cache, busca, export, deleção) · `cloudflare/DATA-ISOLATION-AND-LIFECYCLE.md`
+**Campo de tenant no registro não é isolamento**: achar a query, chave, path ou política que o aplica em cada leitura e escrita.
+- [ ] **Chave composta sem tenant**: chave de cache, path de objeto no bucket, unicidade no banco, ID de documento no índice, arquivo temporário ou chave de dedupe sem tenant/ambiente
+- [ ] **Cópias derivadas com ACL atrasada**: mudança de ACL ou deleção não invalida busca, cache, embedding, thumbnail, RSS, preview — filtrar também na leitura
+- [ ] **Log, analytics, trace como leitor alternativo**: conteúdo privado ou credencial indo para sistema com acesso mais amplo ou retenção maior
+- [ ] **Soft delete ignorado**: lookup direto, busca, relação, link de objeto, job ou restore devolvem/agem sobre registro deletado; identificador deletado pode ser recadastrado enquanto ainda há referência
+- [ ] **Autorização velha**: remoção de membro, mudança de ACL, retirada de consentimento ou revogação não invalida sessões, caches, assinaturas, jobs ou dado materializado
+- [ ] **Fila recria o que foi deletado**: deleção termina no banco principal mas retry, export, analytics ou artefato gerado retém ou recria o dado
+- [ ] **Restore/undelete reintroduz estado inválido**: permissões, membros ou credenciais que a política atual não permite mais
+- [ ] **Migração**: registros antigos sem `tenant_id`/ACL, backfill parcial, leitor velho e novo com defaults diferentes
+
+#### 🟡 Apps locais, desktop e mobile (condicional — servidor em localhost, Electron, webview, deep link, MCP local) · `cloudflare/DESKTOP-MOBILE-AND-LOCAL-IPC.md`
+- [ ] **Servidor HTTP em localhost sem autenticação de peer**: qualquer aba do navegador consegue fazer POST nele (CSRF para localhost) e DNS rebinding alcança GET — exigir token/header customizado + checar `Origin`/`Host`; nunca `0.0.0.0`
+- [ ] **Principal declarado × identidade do canal**: IPC/socket aceita "sou o usuário X" no corpo sem amarrar ao peer autenticado
+- [ ] **Deep link / esquema customizado**: parâmetros do link disparam ação privilegiada, troca de conta ou abrir arquivo sem confirmação
+- [ ] **Webview/Electron**: `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true`; bridge nativa expõe só o necessário e confere a origem que está chamando; navegação para origem externa não herda a bridge
+- [ ] **Helper privilegiado como confused deputy**: processo com mais privilégio executa caminho/comando escolhido por processo menos privilegiado; TOCTOU em arquivo de outro dono
+
+> Memória (C/C++/Rust `unsafe`, parsers binários, FFI, kernel): fora do foco desta skill (web, JS/TS, Python). Se aparecer, aplicar `cloudflare/MEMORY-SAFETY-AND-BINARY.md`.
 
 #### 🟠 File Upload
 - [ ] MIME type validado por **magic bytes**, não só header (lib `file-type` na versão mínima de `cve-watch.md`)
@@ -268,6 +470,13 @@ Lista validada [OWASP Secure Headers Project]:
 - [ ] **Segregação de permissões** entre estágios de build/test/deploy (build não pode fazer deploy; PR de fork não tem secrets; `permissions:` mínimo no workflow)
 - [ ] **Artefatos assinados** quando viável (cosign/sigstore, SLSA L2+) — anti SolarWinds-style supply chain attack
 - [ ] **SBOM gerado** no build (CycloneDX/SPDX) para rastreabilidade de dependências
+- [ ] **Pelo gate** (Cloudflare `SUPPLY-CHAIN-AND-RELEASE.md`): dependência mutável ou vulnerável **sozinha** não é achado (exceto a regra KEV/CVSS ≥ 9 da Fase 0) — mostrar quem influencia a resolução, que build consome e que fronteira de execução ou release vem depois
+- [ ] **Dependency confusion**: pacote com nome interno/escopo privado que pode ser resolvido do registro público (`.npmrc` sem `@escopo:registry`, `--extra-index-url` no pip)
+- [ ] **Injeção em workflow**: `${{ github.event.issue.title }}`, `head_ref`, mensagem de commit, nome de branch ou de artefato dentro de `run:` (usar `env:` intermediário); `pull_request_target`/`workflow_run` fazendo checkout do código do PR com secrets ou token de escrita
+- [ ] **Cache/artefato entre jobs de confiança diferente**: job de PR popula cache ou artefato que o job de deploy restaura e executa
+- [ ] **Promoção por nome mutável**: teste, assinatura e publicação apontam para tag/nome mutável, não para o mesmo digest imutável; checksum baixado do mesmo lugar que o artefato não prova integridade
+- [ ] **Contexto de build** inclui `.env`, config local, `.git` ou fixture com dado real na imagem/pacote publicado
+- [ ] **Plugin/community node/extensão** ganha autoridade além do escopo declarado, ou hook de install roda antes da checagem de autenticidade
 
 #### 🟠 Exception Handling & Fail Closed [A10:2025]
 - [ ] **Global exception handler** ativo — toda exceção não capturada vira `5xx` genérico, **nunca expõe** stack trace, SQL query, path de arquivo ou nome de tabela
@@ -300,6 +509,19 @@ Lista validada [OWASP Secure Headers Project]:
 - [ ] **Fallback e isolamento entre provedores/agentes** [ASI08]: erro de um provider degrada com mensagem genérica, sem vazar prompt/ferramenta; agentes que se comunicam autenticam mensagens entre si
 - [ ] Interações do LLM com dado de usuário logadas (prompt hash, tools chamadas, decisão) — sem PII crua no log
 
+Disciplina da Cloudflare (`cloudflare/AI-AND-LLM.md`) — **prompt injection sozinha não é achado**; exige falha de fronteira no código: conteúdo chega ao contexto de outro principal, aciona autoridade que o solicitante não tem, revela dado que ele não lê ou alimenta um sink que ele não alcança direto. **Prompt de guardrail não é fronteira**: só contam checagens determinísticas, autorização por recurso, isolamento, vínculo e credencial restrita. Mapear antes: cada identidade de execução, cada capacidade, toda fonte gravável de contexto/memória e cada destino de saída; começar pelas tools com efeito colateral e andar para trás.
+- [ ] **Confused deputy**: tool roda com credencial de serviço ampla e o handler **não** checa de novo se o solicitante pode aquela operação naquele recurso (credencial compartilhada com escopo por usuário aplicado na query é OK)
+- [ ] **Vínculo de ação e aprovação**: o que o usuário aprovou (nome normalizado da tool + objeto de argumentos completo + alvo + valor + expiração) é exatamente o que executa; retry ou sessão retomada não reaproveita a aprovação para argumento alterado ou efeito duplicado; conteúdo do atacante não dispara ação sob a autoridade válida da vítima sem pedido dela
+- [ ] **Schema da tool × handler**: schema aceita alias, campo extra, chave duplicada, coerção ou objeto livre que o handler interpreta diferente; revalidar onde o valor vira seletor de recurso
+- [ ] **Argumento de tool até o sink**: SQL, shell, arquivo, fetch de URL, API privilegiada — saída estruturada limita formato, não autoriza nem torna o caminho/URL seguro
+- [ ] **Confusão de papel/proveniência**: concatenação de string, histórico sem tipo, campo `role` vindo do cliente, serialização que perde o rótulo da fonte deixa texto não confiável se passar por system, turno anterior, resultado de tool ou memória
+- [ ] **Vazamento de contexto entre sessões/tenants**: histórico, embeddings, resultados de retrieval e **cache de prompt** com chave ampla demais; filtro de tenant/ACL na própria query e em toda chave de cache
+- [ ] **Envenenamento de memória persistente**: quem cria, atualiza, mescla e apaga memória; proveniência e tenant; observação de baixa confiança vira instrução ou fato durável usado em outra tarefa/usuário/sessão privilegiada
+- [ ] **Loop de ação sem teto**: um pedido enfileira gasto, envio, mutação ou chamada externa repetida sem orçamento por pedido, autorização por ação, cancelamento ou idempotência
+- [ ] **Subagente/MCP herda autoridade demais**: tarefa delegada recebe a sessão, credenciais e memória inteiras em vez do mínimo; resultado delegado tratado como confiável na volta
+- [ ] **Identidade de servidor/tool MCP**: chamadas e respostas roteadas por nome de servidor/tool/ID escolhido pelo modelo, não pela conexão autenticada; dois servidores podem reivindicar a mesma tool; reconexão muda o vínculo
+- [ ] **Metadado MCP como política**: descrição de tool, schema, prompt ou hint de um servidor MCP tratado como autorização — allowlist determinística e authz no handler continuam valendo quando o metadado conflita
+
 #### 🟡 Logging & Monitoring [A09:2025]
 - [ ] **Formato estruturado JSON** com schema consistente — facilita SIEM/ingest, reduz log injection. Fields recomendados pelo OWASP Logging Vocabulary: `datetime`, `level`, `event`, `appid`, `userId`, `sourceIP`, `userAgent`, `action`, `resource`, `result`, `requestId`
 - [ ] **Prefixos de evento consistentes**: `authn:login_success`, `authn:login_failure`, `authz:denied`, `input:validation_failed`, `excess:rate_limit_hit`, `txn:payment_attempt`
@@ -325,6 +547,31 @@ Aplicar quando a aplicação coleta/processa dados pessoais (qualquer app com ca
 - [ ] **Dados pessoais enviados a LLM/terceiros** (provedor de modelo, transcrição, e-mail marketing) listados como operadores; PII minimizada/pseudonimizada no prompt
 - [ ] **Notificação de incidente** documentada (quem, quando, autoridades; LGPD/ANPD e GDPR/DPA)
 
+#### 🔎 Varredura literal dos óbvios (Cloudflare "Obvious things" — fazer item por item, reportar cada resultado)
+Ninguém olha porque todo mundo acha que alguém já olhou. Não precisa criatividade, precisa ser literal. Mas **flag não é achado**: antes de reportar, seguir o caminho até o impacto (cookie sem `HttpOnly` só importa se carrega dado sensível e o JS não precisa ler).
+- [ ] `git grep -nE "password|secret|apikey|api_key|token|Bearer|-----BEGIN"` e senhas default comuns
+- [ ] `git grep -nE "TODO|FIXME|HACK|XXX" | grep -iE "auth|valid|permiss|secur|check|skip|bypass"` (`TODO: add auth`, `HACK: skip permission check`)
+- [ ] Modo debug/dev ativável em produção por variável de ambiente, query string ou header
+- [ ] Credenciais de teste/exemplo/seed que funcionam em produção
+- [ ] Rotas `/debug`, `/admin`, `/test`, `/status`, `/health`, `/metrics`, `/env`, `/.env`, `/config` sem proteção ou vazando dado
+- [ ] Arquivos `.env*`, `credentials.json`, `*.pem`, `*.key`, `service-account*.json` versionados; `.gitignore` cobre segredos, uploads e config local
+- [ ] Dependências fixadas (lockfile) e CVEs conhecidos (Fase 0/1)
+- [ ] `eval`, `exec`, `child_process`, `Function()`, `vm.runInContext`, `import()` com entrada dinâmica
+- [ ] CORS `*` ou permissivo demais; `Allow-Credentials` com origem curinga/refletida
+- [ ] Cookies sem `HttpOnly`/`Secure`/`SameSite`
+- [ ] Parâmetros `redirect`, `return`, `returnTo`, `next`, `url`, `goto`, `continue`, `callbackUrl` indo para redirect sem validação
+- [ ] Algum endpoint só HTTP; TLS forçado
+- [ ] Resposta de erro em produção com stack trace, caminho interno ou erro SQL
+
+#### 🃏 Curinga (Cloudflare "Wildcard" — uma passada sem categoria, no que o diff toca)
+- [ ] Qual o código mais estranho do diff? Por que existe? O que acontece se for abusado? Variável chamada `temp`, `hack`, `legacy`: ler com cuidado; comentário dizendo "isso é seguro porque…": verificar a explicação
+- [ ] Feature pela metade, experimental ou "colada": é a que teve menos review
+- [ ] **API usada de um jeito que o frontend nunca usa**: chamadas possíveis que o cliente nunca faz; endpoints, parâmetros, headers ou features não documentados no registro de rotas/middleware/config
+- [ ] Features que não foram feitas para funcionar juntas: localização + preview + cache; import + plugins + webhooks; OAuth + impersonação + API key
+- [ ] Histórico do git: fix de segurança revertido, check de auth comentado, segredo commitado e removido (continua no histórico)
+- [ ] Presunções sobre o ambiente: banco local, relógio certo, DNS confiável, filesystem case-sensitive
+- [ ] **Testes: o que eles não testam?** Compare os casos de borda que o dev pensou (tem teste) com os que não pensou
+
 #### 🟢 Defesas Extras
 - [ ] **Honey pots**: rotas falsas que logam acessos:
   ```
@@ -345,7 +592,7 @@ A lista viva está em **`cve-watch.md`** (mantida pela Fase 0). Os que viraram *
 - [ ] **Drizzle identifiers** (CVE-2026-39356): ≥ 0.45.2 **e** allowlist em qualquer `sql.identifier`/`.as`
 - [ ] **MCP servers**: validar integridade de tool schemas (tool poisoning, session hijacking); SDK na versão mínima de `cve-watch.md`
 
-### Fase 3 — Self-check (16 perguntas, antes de fechar o report)
+### Fase 3 — Self-check (24 perguntas) e verificação adversarial
 
 Para cada feature/endpoint mexido, mentalmente simule:
 
@@ -365,8 +612,28 @@ Para cada feature/endpoint mexido, mentalmente simule:
 14. E se o provedor de auth estiver mal configurado em prod (secret ausente) — o check falha **fechado** ou aberto?
 15. E se eu reenviar o mesmo webhook (replay) ou mandar um com assinatura inválida?
 16. E se o LLM ler uma instrução escondida no dado que ele processa (e-mail, página, resultado de tool)? Que tool ele consegue acionar com isso?
+17. E se eu chamar a API de um jeito que o frontend nunca chama (campo extra, método diferente, rota não usada pela UI)?
+18. E se eu usar export, import, busca, filtro ou ordenação para chegar a dado que eu não leio direto?
+19. Depois de logout, troca de senha, troca de conta ou remoção de membro, alguma coisa ainda autoriza (sessão, cache, service worker, job, assinatura SSE/WebSocket, token de refresh)?
+20. Se o passo 2 de 3 falhar, o passo 1 é desfeito? E se eu repetir um fluxo já concluído?
+21. E se a mesma mensagem/evento chegar duas vezes, ou fora de ordem, ou depois que o estado mudou?
+22. A aprovação que o usuário deu vale exatamente para o que executa (mesmos argumentos, mesmo alvo), ou um retry/turno seguinte usa argumentos alterados?
+23. Uma requisição pequena e barata pode gerar trabalho grande e compartilhado (descompressão, query sem limite, chamada ao LLM que continua depois do cliente cair)?
+24. Existe outra porta para o mesmo efeito com checagem mais fraca (rota legada, batch, admin, job, n8n, import)?
 
-Se alguma pergunta não tem resposta clara no código, é um achado.
+Se alguma pergunta não tem resposta clara no código, é um **candidato** — passa pelo gate e pela verificação abaixo antes de virar achado.
+
+#### Fase 3b — Verificação adversarial (Cloudflare: "tente refutar")
+
+Todo candidato passa por uma tentativa de refutação antes de entrar no relatório:
+
+1. **Auto-refutação (todos os candidatos):** reler cada linha citada no código atual; reconstruir o controle mais forte no caminho (validação, identidade, autorização, normalização, framework, middleware, constraint do banco); confirmar que a primeira etapa do rastro é uma entrada real de menor confiança e a última é o sink/efeito alegado; conferir se severidade e fix batem só com o que a evidência estabelece. Decidir **confirmado / precisa validar / rejeitado**.
+2. **Verificador independente (candidatos 🔴 e 🟠 no modo diff; todos no modo completo):** lançar um subagente novo (Agent, `general-purpose`, no modelo mais capaz disponível), um por candidato (agrupar por arquivo se passar de 6), que **não caçou** e **não recebe a conclusão de outro verificador**. Passar só: o candidato (rastro, evidência, condições, causa raiz alegada), os caminhos do repo, os fatos de arquitetura necessários e as regras de validação do domínio (`Validation rules` do arquivo em `cloudflare/`). Prompt base:
+
+   > Você não escreveu este candidato. Tente refutá-lo a partir do código do repositório. Não contate nada que está no ar; não execute código do projeto (só leitura). (1) Confira cada arquivo, linha, escopo e descrição do rastro; confirme que a primeira etapa é uma entrada real de menor confiança e a última é o sink ou efeito alegado. (2) Reconstrua o controle mais forte visível no caminho: validação, identidade, autorização, normalização, ciclo de vida, framework, contenção. (3) Confira entradas, condições e o principal/recurso afetado; não infira resultado mais forte que o rastro mostra. (4) Confira se probabilidade, impacto e fix batem só com o que a evidência estabelece. (5) Se o candidato depende de um fato fora do código, decida se esse fato é mesmo decisivo; se o código refuta o rastro, rejeite. Responda com: veredicto (confirmado | precisa validar | rejeitado), justificativa com `arquivo:linha`, severidade corrigida (só se confirmado), bloqueio exato e plano de checagem (só se precisa validar).
+
+   O resultado do verificador substitui a redação original. Discordância entre você e o verificador sobre um 🔴: reportar a posição mais conservadora **com o motivo da divergência**, nunca escolher em silêncio.
+3. Candidato rejeitado sai dos achados e entra em uma linha na seção **❌ Rejeitados**.
 
 ### Fase 4 — Reportar (insumo para o planner do agente)
 
@@ -374,16 +641,37 @@ Se alguma pergunta não tem resposta clara no código, é um achado.
 
 Cada finding deve trazer **fix + risco de regressão + dependências + esforço + tarefas humanas associadas**:
 
+**Achado confirmado:**
+
 ```
-[ID] [CATEGORIA] Severidade: 🔴 CRÍTICO | 🟠 ALTO | 🟡 MÉDIO | 🟢 INFO
+[ID] [CATEGORIA] Severidade: 🔴 CRÍTICO | 🟠 ALTO | 🟡 MÉDIO | 🟢 BAIXO/INFO   ·   Verificado por: auto | subagente
+Fingerprint: <id estável da causa raiz, sem linha nem severidade — ex.: authz/orders-get-missing-owner-check>
 Arquivo: <arquivo:linha>
+Rastro: <entrada arquivo:linha → propagação arquivo:linha → sink arquivo:linha>
 Evidência: <snippet de código>
+Fronteira: <principal de menor confiança> → <controle que falta/falha> → <principal/recurso afetado>
+Condições: <pré-requisitos para explorar: logado? papel? feature ligada? deploy self-hosted?>
 Por que importa: <impacto em 1 frase — o que o atacante consegue>
-Cenário de ataque: <como o atacante explora>
-Fix sugerido: <mudança concreta de código/config — ou "tarefa humana" se não for editável por agente>
+Cenário de ataque: <como o atacante explora, na interface nativa: request HTTP, Server Action, mensagem, arquivo>
+Probabilidade × impacto: <quem alcança e com que esforço> × <o que acontece>
+Invariante: <a regra que o código precisa garantir>
+Fix sugerido: <menor mudança efetiva no último ponto de decisão confiável — ou "tarefa humana" se não for editável por agente>
+Teste de regressão: <o caso que falha hoje e passa depois do fix>
 Risco de regressão: <o que pode quebrar ao aplicar: contrato de API alterado, migration necessária, testes que vão exigir update, header novo que pode quebrar consumidor X, comportamento que clientes assumem>
 Dependências: <IDs de findings que precisam vir antes, OU "nenhuma">
 Esforço: S (≤1h) | M (≤4h) | L (>4h, exige refactor)
+```
+
+**Precisa validar (sem severidade):**
+
+```
+[ID] [CATEGORIA] 🔍 PRECISA VALIDAR
+Fingerprint: <id estável>
+Rastro: <arquivo:linha → ... → arquivo:linha>
+Causa raiz alegada: <o que estaria errado>
+Fronteira em jogo: <principal> → <recurso> (resultado possível, não demonstrado)
+Bloqueio: <o fato exato que o código não mostra — ex.: "o proxy do provedor sobrescreve X-Forwarded-For?", "a policy de RLS da tabela orders está ativa no painel?">
+Como resolver: <checagem local com fixture> e/ou <o que o dono olha no painel/config — nunca "mande tráfego para produção">
 ```
 
 Estrutura do report final:
@@ -397,9 +685,14 @@ Estrutura do report final:
 - Último CVE processado: <id>
 
 ### Sumário
-- N findings: X 🔴 / Y 🟠 / Z 🟡 / W 🟢
+- Postura em 1-2 frases
+- N achados confirmados: X 🔴 / Y 🟠 / Z 🟡 / W 🟢 · P precisa validar · R rejeitados
 - Arquivos auditados: <count>
 - Áreas de maior risco: <auth | input | race | etc>
+
+### Tabela de achados confirmados
+| Sev. | Título | Fronteira afetada | Resultado em 1 linha |
+|---|---|---|---|
 
 ### 🔴 CRÍTICO (bloqueia deploy)
 <findings com formato acima — inclui dependência em KEV/CVSS ≥ 9 com versão afetada>
@@ -410,8 +703,22 @@ Estrutura do report final:
 ### 🟡 MÉDIO
 ...
 
-### 🟢 RECOMENDAÇÕES
+### 🟢 BAIXO / INFO
 ...
+
+### 🔍 PRECISA VALIDAR (sem severidade — leads priorizados)
+<formato "precisa validar" acima; ordenar pelo que estaria em jogo se confirmado>
+
+### 🧱 Hardening (não são achados)
+<itens do checklist em falta que não passaram no gate: header ausente sem caminho de exploração, defesa em profundidade, boas práticas — cada um em 1 linha com o motivo de não ser achado>
+
+### ❌ Rejeitados
+<fingerprint · o que parecia · por que caiu (controle em arquivo:linha, pré-condição impossível, sem impacto)>
+
+### 🗺️ Cobertura
+- Superfícies auditadas e blocos de domínio aplicados (e os descartados, com motivo)
+- O que ficou de fora (arquivos não lidos, domínios não aplicados, fatos de deploy não verificados)
+- Nenhuma passada é exaustiva: dizer o que não foi coberto, nunca "o resto está ok"
 
 ### 📦 Modulação sugerida (fases independentes para corrigir em PRs separados)
 
@@ -451,6 +758,7 @@ Lista de superfícies que podem quebrar e exigem atenção redobrada em testes:
 - [ ] Atualizar Política de Privacidade / Termos
 - [ ] Configurar alertas no SIEM para novos eventos logados
 - [ ] Pedir API key da NVD (acelera a Fase 0 em 10x)
+- [ ] Fazer as checagens de painel dos itens 🔍 PRECISA VALIDAR (provedor de hospedagem, CDN, banco, IdP) e devolver o resultado
 
 ### ✅ Verificado OK
 - <lista explícita do que foi auditado e está correto — evita sensação de "achou tudo">
@@ -464,7 +772,7 @@ Pergunte ao usuário:
 A partir das respostas, o agente usa seu planejamento normal para executar — a skill **não constrói plano próprio**, não chama TaskCreate para fases de implementação, não edita código. Apenas relatou.
 ```
 
-Se não achar nada crítico, diga explicitamente: **"Nenhuma brecha crítica encontrada"** e preencha a seção "Verificado OK". Não invente problemas para parecer útil.
+Se não achar nada crítico, diga explicitamente: **"Nenhuma brecha crítica encontrada"** e preencha a seção "Verificado OK". Não invente problemas para parecer útil. Uma rodada limpa pode ter **zero** achados confirmados: dizer isso e os limites de cobertura, sem inventar 🟢 para encher o relatório.
 
 ## Princípios
 
@@ -473,9 +781,39 @@ Se não achar nada crítico, diga explicitamente: **"Nenhuma brecha crítica enc
 - **Never trust the frontend**: tudo do cliente é input não-confiável (headers, cookies, body, MIME types, filenames). **Nem o LLM**: output de modelo e conteúdo que ele leu são input não-confiável também.
 - **Verifique no código, não na memória**: o checklist guia o que procurar, mas a vulnerabilidade tem que estar no diff atual.
 - **CVE é fato, não opinião**: dependência com CVE em KEV ou CVSS ≥ 9 em versão afetada é 🔴 mesmo que o diff não toque nela — o deploy leva a dependência junto.
-- **Não cause falso pânico**: se não tem certeza se é exploitable, classifique como 🟡 e explique o cenário de ataque. CVE com pré-condição que o projeto não atende (só Windows, só dev server, só feature X) é 🟢 informativo.
+- **Não cause falso pânico, nem rebaixe para esconder dúvida**: se não dá para saber se é explorável porque falta um fato fora do código, é **precisa validar** (sem severidade, com o bloqueio exato), não um 🟡 genérico. CVE com pré-condição que o projeto não atende (só Windows, só dev server, só feature X) é 🟢 informativo.
+- **Fronteira + resultado, ou não é achado**: checklist diz onde olhar; o gate diz o que reportar. O resto é hardening.
+- **A política efetiva é a do caminho mais fraco**: toda porta para a mesma identidade, toda rota para a mesma operação.
+- **Prompt de guardrail não é fronteira**: em LLM/agente só contam checagens determinísticas, authz por recurso, isolamento e credencial restrita.
+- **Fix no último ponto de decisão confiável**: o menor ajuste que garante o invariante, com teste de regressão — não conselho genérico de hardening, e sem só mover a confiança de lugar.
+- **Nenhuma passada é exaustiva**: o relatório diz o que não cobriu.
 - **Foque no que mudou**: não audite a base inteira — só o que está pendente para deploy (exceção: dependências e CVEs, que valem pro artefato inteiro).
 - **Cite linhas específicas**: sempre formato `arquivo.ts:42` para o usuário navegar direto.
+
+## Auditoria completa (modo repo inteiro)
+
+Só com pedido explícito (ver **Modos**). Adaptação do fluxo de 6 fases da Cloudflare (`cloudflare/SKILL-original.md`, `RECONNAISSANCE.md`, `HUNTING.md`, `VALIDATION-AND-REPORTING.md` — ler esses quatro antes de começar; os prompts deles são a referência literal). O que muda em relação a eles está abaixo; o resto segue o original.
+
+**Antes de lançar qualquer agente:**
+1. **Perfil**: `quick` (1 onda de caçadores + 1 crítico final; 1 verificador por candidato), `standard` (padrão: ondas até o crítico final voltar limpo), `deep` (unidades por subsistema e ciclo de vida, verificação de candidato e de registro separadas). Escopo opcional: caminhos, um subsistema, um domínio ou o diff entre duas refs (o resto vira `out_of_scope`, nunca `covered`).
+2. **Orçamento**: estimar o número de agentes (4 de reconhecimento + caçadores ≈ unidades do ledger + 1-2 críticos por onda + 1-2 verificadores por candidato) e **mostrar a estimativa ao usuário e esperar o ok**. Reservar críticos e verificação antes de gastar com caçadores; se o orçamento não cobre, propor escopo menor ou perfil mais leve, nunca afinar a evidência em silêncio.
+3. **Pasta de saída**: `~/.claude/skills/security-check/runs/<repo>/run-<N>/` (N = próximo inteiro livre). Nunca dentro do repo auditado.
+4. **Fase 0 (NVD/KEV)** roda igual ao modo diff, uma vez, e o resultado entra no relatório.
+5. **Runs anteriores**: ler `coverage-ledger.json` e `findings.json` das runs anteriores do mesmo repo; achado confirmado com código inalterado é reverificado, não recaçado; código mudado vira unidade de revalidação; `needs_validation`, `deferred` e `blocked` anteriores viram trabalho atual. Sem run anterior: dizer isso no relatório.
+
+**Execução:**
+- Agentes: `Agent` com `subagent_type: general-purpose` no modelo mais capaz disponível. Reconhecimento: os 4 agentes 1a-1d de `RECONNAISSANCE.md` em paralelo, só leitura. Caçadores, críticos e verificadores: prompts de `HUNTING.md` e `VALIDATION-AND-REPORTING.md`, com os blocos de domínio copiados **literalmente** de `cloudflare/` (o checklist deste arquivo entra junto como lista do que procurar).
+- **Execução de código do alvo: desligada por padrão.** Sem o sandbox de SO que a Cloudflare exige (sem rede, ambiente vazio, alvo só leitura, limites de CPU/memória/tempo). Então caçadores e verificadores trabalham **só com leitura de fonte** (`method: "source"`, `artifact: null`), e o que precisaria de execução para confirmar vira `needs_validation` com o plano de checagem local. Ignorar o procedimento de promoção de artefatos.
+- Só o agente principal escreve na pasta da run (`run-metadata.json`, `architecture.md` ≤ 1.000 palavras, `coverage-ledger.json`, `findings.json`). Subagentes devolvem JSON estruturado.
+- Validar sempre que mexer:
+  ```bash
+  node ~/.claude/skills/security-check/cloudflare/validate-coverage-ledger.cjs <run>/coverage-ledger.json
+  node ~/.claude/skills/security-check/cloudflare/validate-findings.cjs <run>/findings.json
+  ```
+  `findings.json` segue `cloudflare/report-schema.json` (campos em inglês, `confirmed` / `needs_validation` / `rejected`). Mapear severidade: critical → 🔴, high → 🟠, medium → 🟡, low/informational → 🟢.
+- Estados terminais (só dois): relatório escrito e os dois validadores passando, **ou** `run_status: "incomplete"` com o motivo exato e a lacuna dita no relatório. Nunca parar no meio de uma fase.
+
+**Saída:** `REPORT.md` em português, no formato da Fase 4 deste arquivo (com a seção 📡 NVD/KEV, cobertura vinda do ledger e o resultado do crítico final), mais `FINDINGS-DETAIL.md` (achados 🟡+ com rastro e reprodução local) e `NEEDS-VALIDATION.md`. Na resposta, passar os caminhos absolutos. A regra de ouro continua: **só relatório**, a correção vem do planner depois que o usuário escolher o escopo.
 
 ## Histórico do checklist
 
@@ -489,5 +827,6 @@ Este checklist combina:
 7. **Padrões consolidados** (timing-safe comparison, timing-safe response anti-enumeração, idempotency keys, SELECT FOR UPDATE, refresh token rotation, SLSA/SBOM para supply chain, image proxy estilo Camo, Data Access Layer do Next.js).
 8. **LGPD/GDPR baseline** — endpoints de data subject rights (acesso, correção, portabilidade, exclusão, revogação) e retenção cobrindo logs/backups.
 9. **Checklist de segurança do Tiago ([@construindoumastartup](https://instagram.com/construindoumastartup))** — referência usada para validar e expandir a skill nas seções de **Insecure Design** (catálogo de regras de negócio backend-side), **cenários ampliados de race conditions** (likes/follows/recursos únicos/convites), **Exception Handling** explícito, **logging estruturado** com vocabulário consistente, **baseline LGPD/GDPR** e **CI/CD integrity**. Os pontos do checklist do Tiago foram cruzados com OWASP Cheat Sheets antes de entrarem na skill.
+10. **[Cloudflare security-audit-skill](https://github.com/cloudflare/security-audit-skill)** (MIT, commit c1c8a8c, cópia em `cloudflare/`) — a skill que deu origem ao harness de descoberta de vulnerabilidades da Cloudflare. Trouxe: gate de fronteira + resultado, três veredictos (precisa validar sem severidade), âncoras de severidade, visibilidade de fonte, anti-padrões, método de caça por invariante, verificação adversarial por agente independente, varredura literal dos óbvios, curinga, e as classes de ataque de HTTP/identidade, client-side, mensageria, esgotamento de recursos, isolamento de dados, deploy, supply chain e LLM/MCP; e o modo auditoria completa com ledger de cobertura e validadores.
 
 A regra é: aplicar todos os itens **desde o início**, não deixar para "depois do MVP". E o output desta skill é **sempre só relatório** — execução vem do planner do agente após o usuário definir escopo.

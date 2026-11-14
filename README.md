@@ -6,8 +6,9 @@ Combina o foco do `/security-review` (built-in do Claude Code) com:
 
 1. **Checklist anti-vibe-coding** — padrões recorrentes de exploração em apps modernos
 2. **Práticas validadas do OWASP** (Cheat Sheets + Secure Headers Project)
+3. **Método da [Cloudflare security-audit-skill](https://github.com/cloudflare/security-audit-skill)** (MIT): só é achado o que cruza uma fronteira de confiança real com resultado concreto; veredictos confirmado / precisa validar (sem severidade) / rejeitado; severidade calibrada pelo impacto demonstrado; verificação adversarial por agente independente; classes de ataque por domínio
 
-Cobre 15+ categorias: Access Control (IDOR, privilege escalation), Business Logic (OWASP A04), Auth & Secrets (anti-enumeração, MFA), Input Validation (SQL/NoSQL/XSS), SSRF (com image proxy), Race Conditions, Secrets & Misconfig (A05), Security Headers, File Upload, Webhooks & Supply Chain (SLSA/SBOM), Exception Handling (A10), AI/LLM Security, Logging Estruturado (OWASP vocab), Privacidade LGPD/GDPR, Honey pots.
+Cobre 15+ categorias: Access Control (IDOR, privilege escalation), Business Logic (OWASP A04), Auth & Secrets (anti-enumeração, MFA), Input Validation (SQL/NoSQL/XSS), SSRF (com image proxy), Race Conditions, Secrets & Misconfig (A05), Security Headers, File Upload, Webhooks & Supply Chain (SLSA/SBOM), Exception Handling (A10), AI/LLM Security, Logging Estruturado (OWASP vocab), Privacidade LGPD/GDPR, Honey pots, e os blocos vindos da Cloudflare: cache HTTP, client-side, filas/mensageria, esgotamento de recursos, isolamento de dados e ciclo de vida, apps locais/desktop, abuso de funcionalidade, varredura literal dos óbvios e curinga.
 
 > **Importante:** a skill **só audita e relata**. Não modifica código, configuração nem infra automaticamente. O relatório é desenhado como **insumo para o planejamento nativo do agente** (Claude Code / Codex) — após você definir escopo, o agente executa com seu próprio planner.
 
@@ -33,12 +34,17 @@ Dentro do Claude Code, na raiz de qualquer repo Git:
 /security-check
 ```
 
-A skill vai:
+Três modos:
+- **Diff** (padrão): audita as mudanças pendentes da branch (fases abaixo)
+- **Focado**: pergunta pontual de segurança, um arquivo/endpoint ou triagem de um achado, só com os blocos relevantes
+- **Auditoria completa**: só com pedido explícito ("audita o repo inteiro"); reconhecimento em paralelo, ledger de cobertura, caçadores, crítico de cobertura e verificadores independentes, com `findings.json` validado pelos scripts da Cloudflare em `cloudflare/`. Mostra a estimativa de agentes antes de começar e grava em `runs/` (fora do git)
+
+No modo diff, a skill vai:
 0. **Identificar o stack e sincronizar as falhas publicadas** (Fase 0) — varre os manifestos do projeto, ajusta a lista de componentes monitorados e consulta NVD, catálogo KEV da CISA (as que já estão sendo exploradas) e GitHub Advisory Database desde a última verificação, cruzando com as dependências do projeto (`scripts/nvd_check.py` e `scripts/gh_advisories.py`, só stdlib). O registro vivo fica em `cve-watch.md`, o estado em `nvd-state.json` (criado na primeira execução, fora do git)
 1. **Mapear o terreno** — stack, trust boundaries, superfícies críticas, escopo do diff
 2. **Auditar contra o checklist** — varre cada arquivo modificado procurando padrões de brecha
-3. **Self-check com 16 perguntas** — simula mentalmente cenários de ataque clássicos
-4. **Reportar achados** com finding format expandido: severidade (🔴/🟠/🟡/🟢), arquivo:linha, evidência, cenário de ataque, fix sugerido, **risco de regressão**, **dependências entre fixes**, **esforço estimado**, **modulação em PRs**, **análise de regressão agregada** e **tarefas que só humano pode executar**
+3. **Self-check com 24 perguntas + verificação adversarial** — cada candidato passa pelo gate de fronteira e resultado; os 🔴/🟠 vão para um subagente independente que tenta refutar
+4. **Reportar achados** com finding format expandido: veredicto, severidade (🔴/🟠/🟡/🟢), arquivo:linha, rastro, invariante, teste de regressão, evidência, cenário de ataque, fix sugerido, **risco de regressão**, **dependências entre fixes**, **esforço estimado**, **modulação em PRs**, **análise de regressão agregada** e **tarefas que só humano pode executar**, mais seções de precisa validar, hardening (não são achados), rejeitados e cobertura
 
 A skill **não aplica fix sozinha** — devolve um relatório rico que o agente usa como contexto pro planejamento nativo dele, após você decidir escopo (todos / só CRÍTICO / fatiar em PRs).
 
@@ -66,6 +72,14 @@ A skill **não aplica fix sozinha** — devolve um relatório rico que o agente 
 | 🟠 AI/LLM | Prompt injection, no `bypassPermissions` em prod |
 | 🟡 Logging Estruturado (A09) | JSON com vocabulário OWASP, prefixos de evento, anti log injection |
 | 🟡 Privacidade (LGPD/GDPR) | Endpoints de data subject rights (acesso/correção/exclusão/portabilidade), retenção em logs+backups |
+| 🟠 Abuso de funcionalidade | Export como exfiltração, import como injeção, busca/filtro como oráculo, rollback |
+| 🟠 Cache HTTP | Cache poisoning, cache deception, smuggling em proxy próprio |
+| 🟠 Client-side | DOM XSS, `postMessage`, WebSocket cross-site, service worker, storage após logout, XS-Leaks |
+| 🟠 Filas e mensageria | Envelope × payload, dedupe, ordem, dead-letter, streaming após revogação |
+| 🟠 Recursos e custo | Descompressão, amplificação de query, trabalho antes da auth, LLM que continua após cancelamento |
+| 🟠 Isolamento de dados | Chave sem tenant, cópias derivadas, soft delete, autorização velha, restore |
+| 🟡 Apps locais | Servidor em localhost sem auth, Electron/webview, deep link |
+| 🔎 Óbvios + curinga | Varredura literal de segredos, TODOs de auth, rotas de debug; passada livre no código estranho |
 | 🟢 Honey pots | `/wp-admin`, `/.env`, `/phpmyadmin` |
 
 ---
@@ -90,11 +104,13 @@ From inside Claude Code, at the root of any Git repo:
 /security-check
 ```
 
-The skill will:
+Three modes: **diff** (default, pending changes on the branch), **focused** (a single security question, file or finding triage) and **full audit** (whole repo, only on explicit request; parallel recon, coverage ledger, hunters, coverage critic and independent verifiers, `findings.json` checked by the Cloudflare validators in `cloudflare/`).
+
+In diff mode the skill will:
 0. **Identify the stack and sync published vulnerabilities** (Phase 0) — scans the project manifests, adjusts the watched components and queries NVD, the CISA KEV catalog (actively exploited) and the GitHub Advisory Database since the last check, matching against the project dependencies (`scripts/nvd_check.py` and `scripts/gh_advisories.py`, stdlib only)
 1. **Map the terrain** — stack, trust boundaries, critical surfaces, diff scope
 2. **Audit against the checklist** — scans each modified file for vulnerability patterns
-3. **16-question self-check** — mentally simulates classic attack scenarios
+3. **24-question self-check + adversarial verification** — every candidate must pass the boundary-and-result gate; 🔴/🟠 candidates go to an independent sub-agent that tries to refute them
 4. **Report findings** with expanded format: severity (🔴/🟠/🟡/🟢), file:line, evidence, attack scenario, suggested fix, **regression risk**, **dependencies between fixes**, **effort estimate**, **suggested PR modularization**, **aggregated regression analysis**, and **human-only tasks**
 
 The skill **does not apply fixes itself** — it delivers a rich report meant as context for the agent's native planner, after you decide scope (all / 🔴 only / split into PRs).
@@ -121,11 +137,12 @@ The checklist is grounded on:
 - [OWASP Secure Headers Project](https://owasp.org/www-project-secure-headers/)
 - Recurring exploitation patterns observed in modern web apps (especially "vibe coded" ones)
 - LGPD/GDPR baseline for data subject rights endpoints and retention covering logs+backups
+- [Cloudflare security-audit-skill](https://github.com/cloudflare/security-audit-skill) (MIT) — boundary-and-result gate, confirmed / needs_validation / rejected verdicts, severity anchors, adversarial verification, domain attack classes and the full-audit workflow. An unmodified copy lives in `cloudflare/` with its license
 
 ## Caveats
 
 - This is an **assistive** skill — it doesn't replace a real pentest, security engineer, or formal audit
-- It scans the **diff/branch only**, not the whole codebase
+- By default it scans the **diff/branch only**; the full-audit mode covers the whole codebase but is still **source review only** (it never runs target code without an OS sandbox) and never claims exhaustive coverage
 - "No issues found" doesn't mean the code is secure — it means none of the patterns in the checklist matched
 - Some flagged items may be intentional in your context — always review before applying suggested fixes
 
@@ -133,6 +150,7 @@ The checklist is grounded on:
 
 - Structural ideas (4-phase workflow, 12-question self-check, NoSQL/XSS coverage) were adapted from [vitormiziara/saas-security](https://github.com/vitormiziara/saas-security).
 - The expansion into **A04 Insecure Design** (backend-side business rules), **broader race condition scenarios** (likes/follows/unique resources/single-use invites), **A10 Exception Handling**, **A09 structured logging**, **LGPD/GDPR baseline** and **CI/CD integrity** was informed by **Tiago's security checklist** ([@construindoumastartup](https://instagram.com/construindoumastartup)). Items were cross-referenced with OWASP Cheat Sheets before being incorporated.
+- The audit method (findings gate, verdicts, severity calibration, independent verification, domain companions, coverage ledger and validators) comes from [Cloudflare's security-audit-skill](https://github.com/cloudflare/security-audit-skill), MIT licensed, copyright Cloudflare, Inc.
 
 ## License
 

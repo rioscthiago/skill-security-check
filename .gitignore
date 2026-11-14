@@ -2,3 +2,4 @@ nvd-state.json
 *.digest.md
 *.findings.json
 __pycache__/
+runs/
